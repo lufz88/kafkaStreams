@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Informe Técnico: Kafka Streams en Traffic Analytics</title>
+    <style>
+        :root {
+            --primary-color: #2c3e50;
+            --secondary-color: #3498db;
+            --accent-color: #e67e22;
+            --bg-color: #f4f6f7;
+            --text-color: #333;
+            --code-bg: #1e1e1e;
+            --code-text: #dcdcdc;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: var(--text-color);
+            background-color: var(--bg-color);
+            margin: 0;
+            padding: 0;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 20px;
+            background: white;
+            box-shadow: 0 0 20px rgba(0,0,0,0.1);
+            min-height: 100vh;
+        }
+
+        header {
+            border-bottom: 2px solid var(--primary-color);
+            padding-bottom: 20px;
+            margin-bottom: 30px;
+        }
+
+        h1 { color: var(--primary-color); margin-top: 0; }
+        h2 { color: var(--secondary-color); border-left: 5px solid var(--secondary-color); padding-left: 10px; margin-top: 40px; }
+        h3 { color: var(--primary-color); margin-top: 25px; }
+
+        p { margin-bottom: 15px; }
+
+        .highlight-box {
+            background-color: #e8f4f8;
+            border-left: 4px solid var(--secondary-color);
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 0 4px 4px 0;
+        }
+
+        .warning-box {
+            background-color: #fff3cd;
+            border-left: 4px solid var(--accent-color);
+            padding: 15px;
+            margin: 20px 0;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+
+        th, td {
+            border: 1px solid #ddd;
+            padding: 12px;
+            text-align: left;
+        }
+
+        th {
+            background-color: var(--primary-color);
+            color: white;
+        }
+
+        tr:nth-child(even) {
+            background-color: #f2f2f2;
+        }
+
+        /* Estilos para el bloque de código */
+        .code-container {
+            background-color: var(--code-bg);
+            color: var(--code-text);
+            padding: 20px;
+            border-radius: 8px;
+            overflow-x: auto;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 0.9em;
+            margin-top: 20px;
+            position: relative;
+        }
+
+        pre { margin: 0; }
+
+        /* Syntax Highlighting Simulado */
+        .keyword { color: #569cd6; font-weight: bold; }
+        .type { color: #4ec9b0; }
+        .string { color: #ce9178; }
+        .comment { color: #6a9955; font-style: italic; }
+        .annotation { color: #dcdcaa; }
+        .method { color: #dcdcaa; }
+
+        ul { margin-bottom: 15px; }
+        li { margin-bottom: 8px; }
+
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <header>
+        <h1>Informe Técnico: Arquitectura Kafka Streams</h1>
+        <p><strong>Contexto:</strong> Procesamiento de Tráfico Web y Atribución de Leads</p>
+    </header>
+
+    <section id="intro">
+        <h2>1. Introducción a Kafka Streams</h2>
+        <p>Kafka Streams es una librería de cliente para Java y Scala que permite construir aplicaciones y microservicios donde los datos de entrada y salida se almacenan en clústeres de Kafka.</p>
+        
+        <div class="highlight-box">
+            <strong>Analogía:</strong> Si <em>Kafka Plano</em> es la "tubería" que transporta agua (datos) del punto A al B, <em>Kafka Streams</em> es la "planta de tratamiento" que se instala en medio de la tubería. Filtra, purifica, mezcla y embotella el agua en tiempo real antes de enviarla a su destino.
+        </div>
+
+        <h3>¿Qué problemas resuelve?</h3>
+        <p>En el contexto de la analítica de tráfico (Clicks y Leads), resuelve la complejidad de procesar flujos continuos e infinitos de datos:</p>
+        <ul>
+            <li><strong>Gestión del Estado (Stateful):</strong> Permite recordar información (ej. "¿cuántos clicks lleva esta URL hoy?") sin necesidad de consultar una base de datos externa lenta.</li>
+            <li><strong>Manejo del Tiempo (Time Travel):</strong> Procesa datos basándose en cuándo ocurrieron los hechos (Event Time), no cuando llegaron al servidor. Vital para procesar datos históricos o leads tardíos.</li>
+            <li><strong>Datos Tardíos (Late Arrival):</strong> Gestiona automáticamente datos que llegan desordenados o con retraso (como un Lead que llega 7 días después del Click).</li>
+        </ul>
+    </section>
+
+    <section id="diferencias">
+        <h2>2. Kafka Plano vs. Kafka Streams</h2>
+        <p>A continuación se detallan las diferencias clave al transicionar de la API tradicional de Consumer/Producer a Streams:</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Característica</th>
+                    <th>Kafka Plano (Consumer API)</th>
+                    <th>Kafka Streams (Tu Topología)</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Estado</strong></td>
+                    <td><strong>Stateless.</strong> Procesa mensaje a mensaje. No recuerda el anterior.</td>
+                    <td><strong>Stateful.</strong> Mantiene memoria (conteos, sesiones) usando <em>RocksDB</em> local.</td>
+                </tr>
+                <tr>
+                    <td><strong>Complejidad Lógica</strong></td>
+                    <td>Requiere codificar manualmente bucles, commits y manejo de errores.</td>
+                    <td>Usa un DSL de alto nivel (filter, map, windowedBy, aggregate).</td>
+                </tr>
+                <tr>
+                    <td><strong>Base de Datos</strong></td>
+                    <td>Requiere conectar a Redis/Postgres externo para guardar acumulados.</td>
+                    <td>Trae su propia base de datos embebida (RocksDB) de latencia cero.</td>
+                </tr>
+                <tr>
+                    <td><strong>Manejo de Tiempo</strong></td>
+                    <td>Difícil. Generalmente usa la hora del sistema (System Time).</td>
+                    <td>Nativo. Soporta ventanas de tiempo, sesiones y tiempos de gracia.</td>
+                </tr>
+            </tbody>
+        </table>
+    </section>
+
+    <section id="implicancias">
+        <h2>3. Implicancias de Implementación</h2>
+        <p>Integrar Kafka Streams en una infraestructura existente conlleva consideraciones operativas:</p>
+        
+        <div class="warning-box">
+            <strong>1. Almacenamiento Local (RocksDB):</strong><br>
+            A diferencia de un consumidor normal que solo usa CPU/RAM, tu aplicación creará carpetas en el disco local para guardar el estado de <code>clicks-store</code> y <code>leads-store</code>. Necesitas discos rápidos y espacio disponible en los nodos donde corra la aplicación.
+        </div>
+
+        <ul>
+            <li><strong>Tolerancia a Fallos (Changelog Topics):</strong> Kafka Streams crea automáticamente tópicos internos en tu clúster de Kafka (backups del estado). Verás nuevos tópicos que no creaste manualmente.</li>
+            <li><strong>Escalabilidad:</strong> La aplicación escala automáticamente levantando más instancias. El estado se reparte (sharding) automáticamente entre ellas.</li>
+            <li><strong>Reinicio Pesado:</strong> Si la aplicación se detiene y se borra el disco local, al reiniciar deberá "rehidratar" su estado desde Kafka, lo que puede tomar tiempo antes de empezar a procesar.</li>
+        </ul>
+    </section>
+
+    <section id="codigo">
+        <h2>4. Implementación de la Topología</h2>
+        <p>A continuación, se presenta el código de la clase <code>TrafficTopology.java</code> con documentación técnica integrada explicando cada paso del flujo (Windowing, KTable, Aggregation).</p>
+
+        <div class="code-container">
+<pre><code><span class="keyword">package</span> com.example.traffic_analytics_demo.topology;
+
+<span class="keyword">import</span> com.example.traffic_analytics_demo.model.*;
+<span class="keyword">import</span> com.example.traffic_analytics_demo.util.CustomJsonSerde;
+<span class="keyword">import</span> com.fasterxml.jackson.databind.ObjectMapper;
+<span class="keyword">import</span> com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+<span class="keyword">import</span> org.apache.kafka.common.serialization.Serde;
+<span class="keyword">import</span> org.apache.kafka.common.serialization.Serdes;
+<span class="keyword">import</span> org.apache.kafka.common.utils.Bytes;
+<span class="keyword">import</span> org.apache.kafka.streams.KeyValue;
+<span class="keyword">import</span> org.apache.kafka.streams.StreamsBuilder;
+<span class="keyword">import</span> org.apache.kafka.streams.kstream.*;
+<span class="keyword">import</span> org.apache.kafka.streams.state.WindowStore;
+<span class="keyword">import</span> org.springframework.context.annotation.Bean;
+<span class="keyword">import</span> org.springframework.context.annotation.Configuration;
+<span class="keyword">import</span> org.springframework.kafka.annotation.EnableKafka;
+<span class="keyword">import</span> org.springframework.kafka.annotation.EnableKafkaStreams;
+
+<span class="keyword">import</span> java.time.Duration;
+<span class="keyword">import</span> java.time.Instant;
+<span class="keyword">import</span> java.time.ZoneId;
+<span class="keyword">import</span> java.util.ArrayList;
+<span class="keyword">import</span> java.util.List;
+<span class="keyword">import</span> java.util.function.Function;
+
+<span class="comment">/**
+ * ======================================================================================
+ * TOPOLOGÍA DE TRÁFICO - KAFKA STREAMS
+ * ======================================================================================
+ *
+ * CONCEPTOS CLAVE INTRODUCIDOS AQUÍ:
+ *
+ * 1. KStream vs KTable:
+ * - KStream: Representa un flujo de hechos independientes (ej. "Juan hizo click").
+ * Es infinito y sin estado intrínseco.
+ * - KTable: Representa el estado actual o "la verdad" en un momento dado
+ * (ej. "La URL X tiene 50 clicks acumulados"). Es una vista materializada.
+ *
+ * 2. State Stores (RocksDB):
+ * Kafka Streams no solo mueve datos; los recuerda. Usa RocksDB (base de datos
+ * clave-valor embebida en disco local) para guardar acumulados intermedios.
+ *
+ * 3. Windowing (Ventanas):
+ * Como el flujo de datos es infinito, para "contar" necesitamos partir el tiempo
+ * en trozos manejables (buckets). Aquí usamos ventanas de tiempo (TimeWindows).
+ * ======================================================================================
+ */</span>
+<span class="annotation">@Configuration</span>
+<span class="annotation">@EnableKafka</span>
+<span class="annotation">@EnableKafkaStreams</span> <span class="comment">// Inicia el ciclo de vida de Kafka Streams (arranca threads, gestiona topología)</span>
+<span class="keyword">public class</span> TrafficTopology {
+
+    <span class="comment">/**
+     * -----------------------------------------------------------------------
+     * CONCEPTO: EVENT TIME vs PROCESSING TIME
+     * -----------------------------------------------------------------------
+     * Por defecto, Kafka procesa con la hora del sistema (Processing Time).
+     * Si re-procesamos datos de ayer, el sistema creería que ocurrieron hoy.
+     *
+     * Este Extractor obliga a Kafka a usar la fecha DENTRO del JSON (Event Time).
+     * Esto permite el "Time Travel": Si inyectas un click de hace 5 días,
+     * Kafka abrirá la ventana de agregación de hace 5 días, sumará +1 y la cerrará.
+     */</span>
+    <span class="keyword">public static class</span> JsonTimestampExtractor <span class="keyword">implements</span> org.apache.kafka.streams.processor.TimestampExtractor {
+        <span class="annotation">@Override</span>
+        <span class="keyword">public long</span> extract(org.apache.kafka.clients.consumer.ConsumerRecord&lt;Object, Object&gt; record, <span class="keyword">long</span> partitionTime) {
+            <span class="keyword">try</span> {
+                String json = record.value().toString();
+                <span class="comment">// Extracción de la fecha real del evento de negocio</span>
+                <span class="keyword">if</span> (json.contains(<span class="string">"creationDate"</span>)) {
+                    String date = json.split(<span class="string">"\"creationDate\":\""</span>)[1].split(<span class="string">"\""</span>)[0];
+                    <span class="keyword">return</span> Instant.parse(date).toEpochMilli();
+                } <span class="keyword">else if</span> (json.contains(<span class="string">"clickDate"</span>)) {
+                    String date = json.split(<span class="string">"\"clickDate\":\""</span>)[1].split(<span class="string">"\""</span>)[0];
+                    <span class="keyword">return</span> Instant.parse(date).toEpochMilli();
+                }
+            } <span class="keyword">catch</span> (Exception e) {}
+            <span class="keyword">return</span> System.currentTimeMillis(); <span class="comment">// Fallback</span>
+        }
+    }
+
+    <span class="comment">// --- TOPOLOGÍA PRINCIPAL ---</span>
+    <span class="annotation">@Bean</span>
+    <span class="keyword">public</span> KStream&lt;String, String&gt; kStream(StreamsBuilder builder) {
+
+        <span class="comment">/*
+         * SERDES (Serializer/Deserializer):
+         * Kafka solo entiende bytes. Necesitamos decirle cómo convertir
+         * nuestros objetos Java (TrafficStats) a bytes y viceversa.
+         */</span>
+        Serde&lt;TrafficStats&gt; statsSerde = <span class="keyword">new</span> CustomJsonSerde&lt;&gt;(TrafficStats.class);
+
+        <span class="comment">// =========================================================================
+        // FLUJO 1: CLICKS (HOT PATH - Datos frecuentes)
+        // =========================================================================</span>
+
+        <span class="comment">/*
+         * PASO 1: STREAM (La Tubería de Entrada)
+         * Creamos un KStream. Aquí los datos son solo una secuencia de Strings.
+         * "Consumed" configura cómo leer (deserializar Strings) y qué reloj usar (nuestro Extractor).
+         */</span>
+        KStream&lt;String, String&gt; clicks = builder.stream(<span class="string">"input-clicks"</span>,
+                Consumed.with(Serdes.String(), Serdes.String())
+                        .withTimestampExtractor(<span class="keyword">new</span> JsonTimestampExtractor()));
+
+        clicks
+                <span class="comment">/*
+                 * PASO 2: FLATMAP (Expansión de Datos)
+                 * Transformación "Stateless" (sin estado).
+                 * Un registro entra -> Varios salen.
+                 * Usamos esto para generar las 3 métricas (Normalized, Base, Domain)
+                 * a partir de un solo click físico.
+                 */</span>
+                .flatMap((k, v) -> parseAndExpandClick(v))
+
+                <span class="comment">/*
+                 * PASO 3: GROUP BY KEY (Preparando la Agregación)
+                 * CRÍTICO: Kafka distribuye datos por particiones. Para contar correctamente,
+                 * todos los clicks de la misma URL deben llegar a la misma instancia de la app.
+                 * groupByKey() fuerza un "shuffle" (reparto) en la red para asegurar esto.
+                 */</span>
+                .groupByKey(Grouped.with(Serdes.String(), statsSerde))
+
+                <span class="comment">/*
+                 * PASO 4: WINDOWING (La dimensión del tiempo)
+                 * Definimos "Buckets" temporales.
+                 *
+                 * ofSizeAndGrace(Size, Grace):
+                 * - Size (1 día): Los datos se agrupan por día natural (00:00 a 23:59).
+                 * - Grace (2 horas): ¿Cuánto esperamos a los rezagados?
+                 *
+                 * EXPLICACIÓN: Si son las 12:00 del martes, y llega un click del lunes (ayer):
+                 * - Si llega a las 01:00 am del martes (dentro de las 2h de gracia) -> Se actualiza el lunes.
+                 * - Si llega a las 03:00 am del martes (fuera de gracia) -> Kafka lo descarta (loguea un warn).
+                 * Esto permite cerrar ventanas y liberar memoria/disco.
+                 */</span>
+                .windowedBy(TimeWindows.ofSizeAndGrace(Duration.ofDays(1), Duration.ofHours(2)))
+
+                <span class="comment">/*
+                 * PASO 5: AGGREGATE (La Magia Stateful)
+                 * Aquí transformamos el KStream (flujo) en una KTable (estado).
+                 *
+                 * - Initializer (TrafficStats::new): Crea un objeto vacío cuando empieza una nueva ventana.
+                 * - Aggregator (aggregateClicks): Tu lógica de negocio (sumar clicks, add sets).
+                 *
+                 * MATERIALIZED (Configuración de RocksDB):
+                 * Esta parte configura el almacenamiento físico en disco.
+                 * - as("clicks-store"): Nombre de la carpeta en disco y del tópico interno de changelog.
+                 * - withRetention: Cuánto tiempo físico guardar los datos en disco antes de borrarlos para siempre.
+                 * IMPORTANTE: Retention debe ser >= Size + Grace.
+                 */</span>
+                .aggregate(
+                        TrafficStats::<span class="keyword">new</span>,
+                        <span class="keyword">this</span>::aggregateClicks,
+                        Materialized.&lt;String, TrafficStats, WindowStore&lt;Bytes, <span class="keyword">byte</span>[]&gt;&gt;as(<span class="string">"clicks-store"</span>)
+                                .withKeySerde(Serdes.String())
+                                .withValueSerde(statsSerde)
+                                .withRetention(Duration.ofDays(1).plusHours(4)) <span class="comment">// Margen de seguridad sobre la gracia</span>
+                )
+
+                <span class="comment">/*
+                 * PASO 6: TO STREAM (Emitir resultados)
+                 * La agregación produce una KTable (una tabla de resultados vivos).
+                 * .toStream() convierte cada CAMBIO en esa tabla en un nuevo evento.
+                 * Ej: Si el conteo pasa de 10 a 11, se emite un evento: {key: URL, count: 11}.
+                 */</span>
+                .toStream()
+
+                <span class="comment">/*
+                 * PASO 7: MAP & SINK (Formato final y escritura)
+                 * Windowed&lt;String&gt; contiene la clave y el rango de tiempo (start-end).
+                 * Aquí extraemos solo la clave (String) para que OpenSearch/Elastic la entienda fácil.
+                 */</span>
+                .map((wKey, stats) -> KeyValue.pair(wKey.key(), stats))
+                .to(<span class="string">"output-traffic-upsert"</span>, Produced.with(Serdes.String(), statsSerde));
+
+        <span class="comment">// =========================================================================
+        // FLUJO 2: LEADS (COLD PATH - Datos con mucho retraso)
+        // =========================================================================</span>
+        KStream&lt;String, String&gt; leads = builder.stream(<span class="string">"input-leads"</span>,
+                Consumed.with(Serdes.String(), Serdes.String())
+                        .withTimestampExtractor(<span class="keyword">new</span> JsonTimestampExtractor()));
+
+        leads.flatMap((k, v) -> parseAndExpandLead(v))
+                .groupByKey(Grouped.with(Serdes.String(), statsSerde))
+                <span class="comment">/*
+                 * DIFERENCIA CLAVE EN WINDOWING:
+                 * Aquí la gracia es de 7 DÍAS.
+                 * ¿Por qué? Un usuario hace click hoy (Lunes), pero puede convertirse en Lead el Domingo.
+                 * Queremos atribuir ese Lead al tráfico del Lunes.
+                 * Kafka mantendrá abierta la "ventana del Lunes" en disco durante 7 días más
+                 * esperando a ver si llega algún lead rezagado para ese día.
+                 */</span>
+                .windowedBy(TimeWindows.ofSizeAndGrace(Duration.ofDays(1), Duration.ofDays(7)))
+                .aggregate(
+                        TrafficStats::<span class="keyword">new</span>,
+                        <span class="keyword">this</span>::aggregateLeads,
+                        Materialized.&lt;String, TrafficStats, WindowStore&lt;Bytes, <span class="keyword">byte</span>[]&gt;&gt;as(<span class="string">"leads-store"</span>)
+                                .withKeySerde(Serdes.String())
+                                .withValueSerde(statsSerde)
+                                .withRetention(Duration.ofDays(8)) <span class="comment">// Debe cubrir la gracia larga</span>
+                )
+                .toStream()
+                .map((wKey, stats) -> KeyValue.pair(wKey.key(), stats))
+                .to(<span class="string">"output-leads-update"</span>, Produced.with(Serdes.String(), statsSerde));
+
+        <span class="keyword">return</span> clicks;
+    }
+
+    <span class="comment">// =========================================================================
+    // LÓGICA DE NEGOCIO (AGREGADORES)
+    // =========================================================================</span>
+
+    <span class="comment">/**
+     * Se ejecuta por cada evento entrante.
+     * Al usar Sets (UniqueSessions), hacemos la operación IDEMPOTENTE.
+     * Si Kafka re-procesa el mismo mensaje por un fallo, el Set no duplica el conteo.
+     */</span>
+    <span class="keyword">private</span> TrafficStats aggregateClicks(String key, TrafficStats value, TrafficStats aggregate) {
+        aggregate.setDocId(key);
+        aggregate.setProductId(value.getProductId());
+        <span class="comment">// ... (mapeo de campos) ...</span>
+        <span class="keyword">if</span> (value.getNormalizedUrl() != <span class="keyword">null</span>) aggregate.setNormalizedUrl(value.getNormalizedUrl());
+        <span class="keyword">if</span> (value.getBaseUrl() != <span class="keyword">null</span>) aggregate.setNormalizedUrl(value.getBaseUrl());
+        aggregate.setNormalizedUrl(value.getDomain());
+        aggregate.setType(value.getType());
+        aggregate.setDate(value.getDate());
+
+        aggregate.addClick();
+        aggregate.getUniqueSessions().addAll(value.getUniqueSessions());
+        <span class="keyword">if</span> (!value.getType().equals(<span class="string">"NORMALIZED"</span>))
+            aggregate.getUniqueSources().addAll(value.getUniqueSources());
+
+        <span class="keyword">return</span> aggregate;
+    }
+
+    <span class="keyword">private</span> TrafficStats aggregateLeads(String key, TrafficStats value, TrafficStats aggregate) {
+        aggregate.setDocId(key);
+        aggregate.setProductId(value.getProductId());
+        <span class="comment">// ... (mapeo de campos) ...</span>
+        aggregate.setType(value.getType());
+        aggregate.setDate(value.getDate());
+
+        aggregate.getUniqueLeads().addAll(value.getUniqueLeads());
+        <span class="keyword">return</span> aggregate;
+    }
+
+    <span class="comment">// =========================================================================
+    // PARSING Y FAN-OUT
+    // =========================================================================</span>
+
+    <span class="keyword">private</span> List&lt;KeyValue&lt;String, TrafficStats&gt;&gt; parseAndExpandClick(String json) {
+        <span class="comment">// ... (Misma lógica original de expansión a 3 niveles) ...</span>
+        List&lt;KeyValue&lt;String, TrafficStats&gt;&gt; results = <span class="keyword">new</span> ArrayList&lt;&gt;();
+        <span class="keyword">try</span> {
+            ObjectMapper mapper = <span class="keyword">new</span> ObjectMapper().registerModule(<span class="keyword">new</span> JavaTimeModule());
+            ClickEvent click = mapper.readValue(json, ClickEvent.class);
+            String date = click.getCreationDate().atZone(ZoneId.of(<span class="string">"America/New_York"</span>)).toLocalDate().toString();
+            String prodId = click.getProductId();
+
+            results.add(createTrafficStatKV(prodId, <span class="string">"NORMALIZED"</span>, date, click));
+            results.add(createTrafficStatKV(prodId, <span class="string">"BASE"</span>,  date, click));
+            results.add(createTrafficStatKV(prodId, <span class="string">"DOMAIN"</span>, date, click));
+        } <span class="keyword">catch</span> (Exception e) { e.printStackTrace(); }
+        <span class="keyword">return</span> results;
+    }
+
+    <span class="keyword">private</span> List&lt;KeyValue&lt;String, TrafficStats&gt;&gt; parseAndExpandLead(String json) {
+        <span class="comment">// ... (Misma lógica original de expansión a 3 niveles) ...</span>
+        List&lt;KeyValue&lt;String, TrafficStats&gt;&gt; results = <span class="keyword">new</span> ArrayList&lt;&gt;();
+        <span class="keyword">try</span> {
+            ObjectMapper mapper = <span class="keyword">new</span> ObjectMapper().registerModule(<span class="keyword">new</span> JavaTimeModule());
+            LeadEvent lead = mapper.readValue(json, LeadEvent.class);
+            
+            <span class="comment">// NOTA: Usamos clickDate para viajar al pasado y encontrar la ventana correcta</span>
+            String date = lead.getClickDate().atZone(ZoneId.of(<span class="string">"America/New_York"</span>)).toLocalDate().toString();
+            String prodId = lead.getProductId();
+
+            results.add(createLeadStatKV(prodId, <span class="string">"NORMALIZED"</span>, date, lead ));
+            results.add(createLeadStatKV(prodId, <span class="string">"BASE"</span>, date, lead ));
+            results.add(createLeadStatKV(prodId, <span class="string">"DOMAIN"</span>, date, lead));
+        } <span class="keyword">catch</span> (Exception e) { e.printStackTrace(); }
+        <span class="keyword">return</span> results;
+    }
+
+    <span class="comment">// ... (Helpers createTrafficStatKV, createLeadStatKV, getUrlExtractor se mantienen igual) ...</span>
+    
+    <span class="keyword">private</span> KeyValue&lt;String, TrafficStats&gt; createTrafficStatKV(String prodId, String type, String date, ClickEvent click) {
+        String key = prodId + <span class="string">"#"</span> + type + <span class="string">"#"</span> + getUrlExtractor(type).apply(click) + <span class="string">"#"</span> + date;
+        TrafficStats stats = <span class="keyword">new</span> TrafficStats();
+        stats.setDocId(key);
+        stats.setProductId(prodId);
+        <span class="keyword">if</span> (type.equals(<span class="string">"NORMALIZED"</span>)) stats.setNormalizedUrl(click.getNormalizedUrl());
+        <span class="keyword">if</span> (!type.equals(<span class="string">"DOMAIN"</span>)) stats.setBaseUrl(click.getBaseUrl());
+        stats.setDomain(click.getDomain());
+        stats.setType(type);
+        stats.setDate(date);
+        stats.addSession(click.getSessionId());
+        stats.addSource(click.getSourceLinkId());
+        <span class="keyword">return</span> KeyValue.pair(key, stats);
+    }
+
+    <span class="keyword">private</span> KeyValue&lt;String, TrafficStats&gt; createLeadStatKV(String prodId, String type, String date, LeadEvent lead) {
+        String key = prodId + <span class="string">"#"</span> + type + <span class="string">"#"</span> + getUrlExtractor(type).apply(lead) + <span class="string">"#"</span> + date;
+        TrafficStats stats = <span class="keyword">new</span> TrafficStats();
+        stats.setDocId(key);
+        stats.setProductId(prodId);
+        <span class="keyword">if</span> (type.equals(<span class="string">"NORMALIZED"</span>)) stats.setNormalizedUrl(lead.getNormalizedUrl());
+        <span class="keyword">if</span> (!type.equals(<span class="string">"DOMAIN"</span>)) stats.setBaseUrl(lead.getBaseUrl());
+        stats.setDomain(lead.getDomain());
+        stats.setType(type);
+        stats.setDate(date);
+        stats.getUniqueLeads().add(lead.getLeadId());
+        <span class="keyword">return</span> KeyValue.pair(key, stats);
+    }
+
+    <span class="keyword">private</span> &lt;T&gt; Function&lt;T, String&gt; getUrlExtractor(String type) {
+        <span class="keyword">return</span> event -> {
+            <span class="keyword">try</span> {
+                <span class="keyword">if</span> (event <span class="keyword">instanceof</span> ClickEvent) {
+                    ClickEvent e = (ClickEvent) event;
+                    <span class="keyword">return switch</span> (type) {
+                        <span class="keyword">case</span> <span class="string">"NORMALIZED"</span> -> e.getNormalizedUrl();
+                        <span class="keyword">case</span> <span class="string">"BASE"</span> -> e.getBaseUrl();
+                        <span class="keyword">case</span> <span class="string">"DOMAIN"</span> -> e.getDomain();
+                        <span class="keyword">default</span> -> e.getNormalizedUrl();
+                    };
+                } <span class="keyword">else if</span> (event <span class="keyword">instanceof</span> LeadEvent) {
+                    LeadEvent e = (LeadEvent) event;
+                    <span class="keyword">return switch</span> (type) {
+                        <span class="keyword">case</span> <span class="string">"NORMALIZED"</span> -> e.getNormalizedUrl();
+                        <span class="keyword">case</span> <span class="string">"BASE"</span> -> e.getBaseUrl();
+                        <span class="keyword">case</span> <span class="string">"DOMAIN"</span> -> e.getDomain();
+                        <span class="keyword">default</span> -> e.getNormalizedUrl();
+                    };
+                }
+            } <span class="keyword">catch</span> (Exception ex) { <span class="keyword">return</span> <span class="string">"unknown"</span>; }
+            <span class="keyword">return</span> <span class="string">"unknown"</span>;
+        };
+    }
+}
+</code></pre>
+        </div>
+    </section>
+</div>
+
+</body>
+</html>
